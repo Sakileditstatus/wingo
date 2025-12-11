@@ -956,76 +956,41 @@ def background_update():
         ultimate_engine.update_results()
         time.sleep(3)
 
-@app.route('/api/predict', methods=['GET'])
+@app.route("/api/predict")
 def predict():
-    """Get current prediction"""
-    prediction = ultimate_engine.get_current_prediction()
-    if prediction:
+    try:
+        ts = int(time.time() * 1000)
+        url = API_URL.format(ts)
+
+        res = requests.get(url, headers=HEADERS, timeout=5).json()
+        history = res.get("data", {}).get("list", [])
+
+        if not history:
+            return jsonify({"error": "No data"}), 500
+
+        # Extract numbers
+        numbers = [int(i["result"]) for i in history]
+
+        # Big/Small Prediction
+        analyzer = PerfectAnalyzer()
+        bs = analyzer.ultra_analysis(numbers)
+        big_small = "BIG" if bs["BIG"] > bs["SMALL"] else "SMALL"
+
+        # Number Prediction
+        num_pred = UltimateNumberPredictor()
+        number, conf = num_pred.predict_ultimate_number(numbers, big_small)
+
         return jsonify({
             "status": "success",
-            "data": {
-                "period": prediction["period"],
-                "prediction": prediction["prediction"],
-                "number": prediction["number"],
-                "confidence": prediction["confidence"],
-                "loss_streak": ultimate_engine.loss_streak,
-                "win_streak": ultimate_engine.win_streak
-            }
+            "big_small_prediction": big_small,
+            "number_prediction": number,
+            "confidence": round(conf, 4),
+            "timestamp": ts
         })
-    else:
-        # Try to force a prediction
-        if ultimate_engine.force_prediction():
-            prediction = ultimate_engine.get_current_prediction()
-            if prediction:
-                return jsonify({
-                    "status": "success",
-                    "data": {
-                        "period": prediction["period"],
-                        "prediction": prediction["prediction"],
-                        "number": prediction["number"],
-                        "confidence": prediction["confidence"],
-                        "loss_streak": ultimate_engine.loss_streak,
-                        "win_streak": ultimate_engine.win_streak
-                    }
-                })
-        
-        # If still no prediction, try to fetch latest and use as prediction
-        data = fetch_latest()
-        if data:
-            latest = data[0]
-            period = latest.get("issueNumber", "")
-            number_str = latest.get("number", "0")
-            try:
-                number = int(number_str)
-            except:
-                number = 0
-            pred = get_big_small(number_str)
-            next_period = str(int(period) + 1) if period.isdigit() else str(int(time.time()))
-            return jsonify({
-                "status": "success",
-                "data": {
-                    "period": next_period,
-                    "prediction": pred,
-                    "number": number,
-                    "confidence": 1.0,
-                    "loss_streak": 0,
-                    "win_streak": 0
-                }
-            })
-        
-        # Default prediction if everything fails
-        default_period = str(int(time.time()))
-        return jsonify({
-            "status": "success",
-            "data": {
-                "period": default_period,
-                "prediction": "BIG",
-                "number": 5,
-                "confidence": 0.5,
-                "loss_streak": 0,
-                "win_streak": 0
-            }
-        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/stats', methods=['GET'])
 def stats():
