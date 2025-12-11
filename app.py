@@ -938,7 +938,20 @@ def fetch_latest():
         ts = int(time.time() * 1000)
         res = requests.get(API_URL.format(ts), headers=HEADERS, timeout=10)
         res.raise_for_status()
-        return res.json().get("data", {}).get("list", [])
+        
+        # Check if response is valid JSON
+        if not res.text.strip():
+            print("Empty response received")
+            return []
+            
+        try:
+            data = res.json()
+            return data.get("data", {}).get("list", [])
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {e}")
+            print(f"Response text: {res.text[:200]}...")
+            return []
+            
     except Exception as e:
         print(f"Error in fetch_latest: {e}")
         return []
@@ -959,33 +972,26 @@ def background_update():
 @app.route("/api/predict")
 def predict():
     try:
-        ts = int(time.time() * 1000)
-        url = API_URL.format(ts)
-
-        res = requests.get(url, headers=HEADERS, timeout=5).json()
-        history = res.get("data", {}).get("list", [])
-
-        if not history:
-            return jsonify({"error": "No data"}), 500
-
-        # Extract numbers
-        numbers = [int(i["result"]) for i in history]
-
-        # Big/Small Prediction
-        analyzer = PerfectAnalyzer()
-        bs = analyzer.ultra_analysis(numbers)
-        big_small = "BIG" if bs["BIG"] > bs["SMALL"] else "SMALL"
-
-        # Number Prediction
-        num_pred = UltimateNumberPredictor()
-        number, conf = num_pred.predict_ultimate_number(numbers, big_small)
-
+        # Use the existing engine instead of making a new API call
+        if not ultimate_engine.initialized:
+            return jsonify({"error": "Engine not initialized yet"}), 503
+            
+        current_prediction = ultimate_engine.get_current_prediction()
+        if not current_prediction:
+            # Force a prediction if none exists
+            ultimate_engine.force_prediction()
+            current_prediction = ultimate_engine.get_current_prediction()
+            
+        if not current_prediction:
+            return jsonify({"error": "No prediction available"}), 500
+            
         return jsonify({
             "status": "success",
-            "big_small_prediction": big_small,
-            "number_prediction": number,
-            "confidence": round(conf, 4),
-            "timestamp": ts
+            "big_small_prediction": current_prediction["prediction"],
+            "number_prediction": current_prediction["number"],
+            "confidence": round(current_prediction["confidence"], 4),
+            "period": current_prediction["period"],
+            "timestamp": int(time.time() * 1000)
         })
 
     except Exception as e:
