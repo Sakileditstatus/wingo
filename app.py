@@ -3,6 +3,7 @@ import requests
 import time
 import sys
 import math
+import os
 from collections import deque, Counter
 from typing import List, Tuple, Dict
 from flask import Flask, jsonify, request
@@ -10,6 +11,12 @@ import threading
 import atexit
 import json
 from datetime import datetime
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?ts={}"
 HEADERS = {
@@ -646,6 +653,11 @@ class UltimateAccuracyEngine:
         self.last_update_time = 0
         self.initialized = False
         self.error_count = 0
+        self.last_fetch_time = 0
+        self.last_successful_fetch = False
+        self.app_start_time = time.time()
+        self.thread_running = False
+        self.update_lock = threading.Lock()
     
     def ultimate_predict(self, numbers: List[int], loss_streak: int = 0) -> Tuple[str, int, float]:
         """Ultimate prediction for 95%+ accuracy"""
@@ -748,111 +760,119 @@ class UltimateAccuracyEngine:
     
     def update_results(self):
         """Update results from API"""
-        try:
-            current_time = time.time()
-            # Don't update too frequently (every 5 seconds minimum)
-            if current_time - self.last_update_time < 5:
-                return True
-                
-            self.last_update_time = current_time
-            data = fetch_latest()
-            
-            if not data:
-                self.error_count += 1
-                print(f"Error fetching data. Error count: {self.error_count}")
-                return False
-
-            latest = data[0]
-            current_period = latest.get("issueNumber", "")
-            result_number = latest.get("number", "")
-
+        with self.update_lock:
             try:
-                num = int(result_number)
-                self.last_results.append(num)
-                print(f"Added new result: {num} for period {current_period}")
-            except:
+                current_time = time.time()
+                # Don't update too frequently (every 5 seconds minimum)
+                if current_time - self.last_update_time < 5:
+                    return True
+                    
+                self.last_update_time = current_time
+                self.last_fetch_time = current_time
+                
+                logger.info("Fetching latest results from API...")
+                data = fetch_latest()
+                
+                if not data:
+                    self.error_count += 1
+                    self.last_successful_fetch = False
+                    logger.warning(f"Error fetching data. Error count: {self.error_count}")
+                    return False
+
+                latest = data[0]
+                current_period = latest.get("issueNumber", "")
+                result_number = latest.get("number", "")
+
+                try:
+                    num = int(result_number)
+                    self.last_results.append(num)
+                    logger.info(f"Added new result: {num} for period {current_period}")
+                    self.last_successful_fetch = True
+                except Exception as e:
+                    self.error_count += 1
+                    self.last_successful_fetch = False
+                    logger.error(f"Error parsing result number: {result_number}, {e}")
+                    pass
+
+                # Check previous prediction
+                if self.current_prediction and self.current_prediction["period"] == current_period:
+                    result_side = get_big_small(result_number)
+                    is_win = result_side == self.current_prediction["prediction"]
+                    num_win = str(self.current_prediction["number"]) == str(result_number)[-1:]
+
+                    # Record performance
+                    self.record_performance(is_win, is_win and num_win)
+                    
+                    # Add to prediction history
+                    self.prediction_history.append({
+                        "period": current_period,
+                        "prediction": self.current_prediction["prediction"],
+                        "number": self.current_prediction["number"],
+                        "result": result_side,
+                        "result_number": result_number,
+                        "is_win": is_win,
+                        "is_jackpot": is_win and num_win,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    
+                    logger.info(f"Prediction result: {is_win} for period {current_period}")
+                    
+                    if is_win and num_win:
+                        self.loss_streak = 0
+                        self.win_streak += 1
+                    elif is_win:
+                        self.loss_streak = 0
+                        self.win_streak += 1
+                    else:
+                        self.loss_streak += 1
+                        self.win_streak = 0
+
+                    self.current_prediction = None
+
+                # Make new ultimate prediction
+                if not self.current_prediction and current_period not in self.seen_periods:
+                    self.seen_periods.add(current_period)
+                    next_period = str(int(current_period) + 1) if current_period.isdigit() else ""
+
+                    # Reduced requirement from 15 to 5 for initial predictions
+                    if len(self.last_results) >= 5:
+                        prediction, number, confidence = self.ultimate_predict(
+                            list(self.last_results), 
+                            self.loss_streak
+                        )
+
+                        self.current_prediction = {
+                            "period": next_period,
+                            "prediction": prediction,
+                            "number": number,
+                            "confidence": confidence
+                        }
+                        
+                        logger.info(f"New prediction: {prediction} {number} for period {next_period}")
+                        self.initialized = True
+                    elif len(self.last_results) > 0:
+                        # Even with less than 5 results, make a simple prediction
+                        prediction = "BIG" if sum(1 for n in self.last_results if n >= 5) > len(self.last_results) / 2 else "SMALL"
+                        freq = Counter(self.last_results)
+                        number = max(freq.items(), key=lambda x: x[1])[0]
+                        confidence = 0.5
+                        
+                        self.current_prediction = {
+                            "period": next_period,
+                            "prediction": prediction,
+                            "number": number,
+                            "confidence": confidence
+                        }
+                        
+                        logger.info(f"Initial prediction: {prediction} {number} for period {next_period}")
+                        self.initialized = True
+                
+                return True
+            except Exception as e:
                 self.error_count += 1
-                print(f"Error parsing result number: {result_number}")
-                pass
-
-            # Check previous prediction
-            if self.current_prediction and self.current_prediction["period"] == current_period:
-                result_side = get_big_small(result_number)
-                is_win = result_side == self.current_prediction["prediction"]
-                num_win = str(self.current_prediction["number"]) == str(result_number)[-1:]
-
-                # Record performance
-                self.record_performance(is_win, is_win and num_win)
-                
-                # Add to prediction history
-                self.prediction_history.append({
-                    "period": current_period,
-                    "prediction": self.current_prediction["prediction"],
-                    "number": self.current_prediction["number"],
-                    "result": result_side,
-                    "result_number": result_number,
-                    "is_win": is_win,
-                    "is_jackpot": is_win and num_win,
-                    "timestamp": datetime.now().isoformat()
-                })
-                
-                print(f"Prediction result: {is_win} for period {current_period}")
-                
-                if is_win and num_win:
-                    self.loss_streak = 0
-                    self.win_streak += 1
-                elif is_win:
-                    self.loss_streak = 0
-                    self.win_streak += 1
-                else:
-                    self.loss_streak += 1
-                    self.win_streak = 0
-
-                self.current_prediction = None
-
-            # Make new ultimate prediction
-            if not self.current_prediction and current_period not in self.seen_periods:
-                self.seen_periods.add(current_period)
-                next_period = str(int(current_period) + 1) if current_period.isdigit() else ""
-
-                # Reduced requirement from 15 to 5 for initial predictions
-                if len(self.last_results) >= 5:
-                    prediction, number, confidence = self.ultimate_predict(
-                        list(self.last_results), 
-                        self.loss_streak
-                    )
-
-                    self.current_prediction = {
-                        "period": next_period,
-                        "prediction": prediction,
-                        "number": number,
-                        "confidence": confidence
-                    }
-                    
-                    print(f"New prediction: {prediction} {number} for period {next_period}")
-                    self.initialized = True
-                elif len(self.last_results) > 0:
-                    # Even with less than 5 results, make a simple prediction
-                    prediction = "BIG" if sum(1 for n in self.last_results if n >= 5) > len(self.last_results) / 2 else "SMALL"
-                    freq = Counter(self.last_results)
-                    number = max(freq.items(), key=lambda x: x[1])[0]
-                    confidence = 0.5
-                    
-                    self.current_prediction = {
-                        "period": next_period,
-                        "prediction": prediction,
-                        "number": number,
-                        "confidence": confidence
-                    }
-                    
-                    print(f"Initial prediction: {prediction} {number} for period {next_period}")
-                    self.initialized = True
-            
-            return True
-        except Exception as e:
-            self.error_count += 1
-            print(f"Error updating results: {e}")
-            return False
+                self.last_successful_fetch = False
+                logger.error(f"Error updating results: {e}")
+                return False
     
     def get_current_prediction(self):
         """Get current prediction"""
@@ -876,7 +896,10 @@ class UltimateAccuracyEngine:
                 "win_streak": self.win_streak,
                 "initialized": self.initialized,
                 "error_count": self.error_count,
-                "results_count": len(self.last_results)
+                "results_count": len(self.last_results),
+                "thread_running": self.thread_running,
+                "last_successful_fetch": self.last_successful_fetch,
+                "uptime_seconds": int(time.time() - self.app_start_time)
             }
         
         accuracy = (stats['wins'] / total) * 100
@@ -895,7 +918,10 @@ class UltimateAccuracyEngine:
             "win_streak": self.win_streak,
             "initialized": self.initialized,
             "error_count": self.error_count,
-            "results_count": len(self.last_results)
+            "results_count": len(self.last_results),
+            "thread_running": self.thread_running,
+            "last_successful_fetch": self.last_successful_fetch,
+            "uptime_seconds": int(time.time() - self.app_start_time)
         }
     
     def get_history(self, limit=100):
@@ -904,34 +930,39 @@ class UltimateAccuracyEngine:
     
     def force_prediction(self):
         """Force a prediction even with limited data"""
-        if not self.current_prediction and len(self.last_results) > 0:
-            # Make a simple prediction
-            prediction = "BIG" if sum(1 for n in self.last_results if n >= 5) > len(self.last_results) / 2 else "SMALL"
-            freq = Counter(self.last_results)
-            number = max(freq.items(), key=lambda x: x[1])[0]
-            confidence = 0.5
-            
-            # Get the next period
-            data = fetch_latest()
-            if data:
-                latest = data[0]
-                current_period = latest.get("issueNumber", "")
-                next_period = str(int(current_period) + 1) if current_period.isdigit() else ""
-            else:
-                next_period = str(int(time.time()))
-            
-            self.current_prediction = {
-                "period": next_period,
-                "prediction": prediction,
-                "number": number,
-                "confidence": confidence
-            }
-            
-            print(f"Force prediction: {prediction} {number} for period {next_period}")
-            self.initialized = True
-            
-            return True
-        return False
+        with self.update_lock:
+            if not self.current_prediction and len(self.last_results) > 0:
+                # Make a simple prediction
+                prediction = "BIG" if sum(1 for n in self.last_results if n >= 5) > len(self.last_results) / 2 else "SMALL"
+                freq = Counter(self.last_results)
+                number = max(freq.items(), key=lambda x: x[1])[0]
+                confidence = 0.5
+                
+                # Get the next period
+                data = fetch_latest()
+                if data:
+                    latest = data[0]
+                    current_period = latest.get("issueNumber", "")
+                    next_period = str(int(current_period) + 1) if current_period.isdigit() else ""
+                else:
+                    next_period = str(int(time.time()))
+                
+                self.current_prediction = {
+                    "period": next_period,
+                    "prediction": prediction,
+                    "number": number,
+                    "confidence": confidence
+                }
+                
+                logger.info(f"Force prediction: {prediction} {number} for period {next_period}")
+                self.initialized = True
+                
+                return True
+            return False
+    
+    def force_update(self):
+        """Force an update of results"""
+        return self.update_results()
 
 def fetch_latest():
     try:
@@ -940,7 +971,7 @@ def fetch_latest():
         res.raise_for_status()
         return res.json().get("data", {}).get("list", [])
     except Exception as e:
-        print(f"Error in fetch_latest: {e}")
+        logger.error(f"Error in fetch_latest: {e}")
         return []
 
 # ----------------------------
@@ -952,6 +983,12 @@ ultimate_engine = UltimateAccuracyEngine()
 
 def background_update():
     """Background thread to update results"""
+    ultimate_engine.thread_running = True
+    logger.info("Background update thread started")
+    
+    # Initial fetch
+    ultimate_engine.update_results()
+    
     while True:
         ultimate_engine.update_results()
         time.sleep(3)
@@ -1022,7 +1059,10 @@ def health():
         "timestamp": datetime.now().isoformat(),
         "uptime": "Running",
         "initialized": ultimate_engine.initialized,
-        "results_count": len(ultimate_engine.last_results)
+        "results_count": len(ultimate_engine.last_results),
+        "thread_running": ultimate_engine.thread_running,
+        "last_successful_fetch": ultimate_engine.last_successful_fetch,
+        "error_count": ultimate_engine.error_count
     })
 
 @app.route('/api/result', methods=['GET'])
@@ -1069,7 +1109,7 @@ def period():
 @app.route('/api/force_update', methods=['POST'])
 def force_update():
     """Force an update of results and prediction"""
-    if ultimate_engine.update_results():
+    if ultimate_engine.force_update():
         return jsonify({
             "status": "success",
             "message": "Update successful"
@@ -1080,10 +1120,63 @@ def force_update():
             "message": "Update failed"
         }), 500
 
+@app.route('/api/force_prediction', methods=['POST'])
+def force_prediction():
+    """Force a prediction even with limited data"""
+    if ultimate_engine.force_prediction():
+        prediction = ultimate_engine.get_current_prediction()
+        if prediction:
+            return jsonify({
+                "status": "success",
+                "message": "Prediction generated",
+                "data": {
+                    "period": prediction["period"],
+                    "prediction": prediction["prediction"],
+                    "number": prediction["number"],
+                    "confidence": prediction["confidence"]
+                }
+            })
+    
+    return jsonify({
+        "status": "error",
+        "message": "Failed to generate prediction"
+    }), 500
+
+@app.route('/api/diagnose', methods=['GET'])
+def diagnose():
+    """Diagnose potential issues"""
+    stats = ultimate_engine.get_stats()
+    
+    issues = []
+    
+    if not stats["thread_running"]:
+        issues.append("Background thread is not running")
+    
+    if not stats["last_successful_fetch"]:
+        issues.append("Last fetch was unsuccessful")
+    
+    if stats["error_count"] > 5:
+        issues.append(f"High error count: {stats['error_count']}")
+    
+    if stats["results_count"] < 5:
+        issues.append(f"Insufficient data: only {stats['results_count']} results")
+    
+    if not stats["initialized"]:
+        issues.append("Engine not initialized")
+    
+    return jsonify({
+        "status": "success",
+        "data": {
+            "issues": issues,
+            "stats": stats
+        }
+    })
+
 if __name__ == "__main__":
     # Start background thread for updating results
     update_thread = threading.Thread(target=background_update, daemon=True)
     update_thread.start()
     
     # Run Flask app
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
