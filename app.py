@@ -609,7 +609,11 @@ class UltimateNumberPredictor:
     def smart_number_fallback(self, numbers: List[int], big_small_pred: str) -> Tuple[int, float]:
         """Smart fallback for number prediction"""
         if not numbers:
-            return 5, 0.5
+            # Return a number that aligns with the prediction
+            if big_small_pred == "BIG":
+                return 7, 0.5
+            else:
+                return 2, 0.5
         
         # Weighted frequency with recency
         weighted = Counter()
@@ -639,6 +643,9 @@ class UltimateAccuracyEngine:
         self.current_prediction = None
         self.loss_streak = 0
         self.win_streak = 0
+        self.last_update_time = 0
+        self.initialized = False
+        self.error_count = 0
     
     def ultimate_predict(self, numbers: List[int], loss_streak: int = 0) -> Tuple[str, int, float]:
         """Ultimate prediction for 95%+ accuracy"""
@@ -742,8 +749,17 @@ class UltimateAccuracyEngine:
     def update_results(self):
         """Update results from API"""
         try:
+            current_time = time.time()
+            # Don't update too frequently (every 5 seconds minimum)
+            if current_time - self.last_update_time < 5:
+                return True
+                
+            self.last_update_time = current_time
             data = fetch_latest()
+            
             if not data:
+                self.error_count += 1
+                print(f"Error fetching data. Error count: {self.error_count}")
                 return False
 
             latest = data[0]
@@ -753,7 +769,10 @@ class UltimateAccuracyEngine:
             try:
                 num = int(result_number)
                 self.last_results.append(num)
+                print(f"Added new result: {num} for period {current_period}")
             except:
+                self.error_count += 1
+                print(f"Error parsing result number: {result_number}")
                 pass
 
             # Check previous prediction
@@ -777,6 +796,8 @@ class UltimateAccuracyEngine:
                     "timestamp": datetime.now().isoformat()
                 })
                 
+                print(f"Prediction result: {is_win} for period {current_period}")
+                
                 if is_win and num_win:
                     self.loss_streak = 0
                     self.win_streak += 1
@@ -794,7 +815,8 @@ class UltimateAccuracyEngine:
                 self.seen_periods.add(current_period)
                 next_period = str(int(current_period) + 1) if current_period.isdigit() else ""
 
-                if len(self.last_results) >= 15:
+                # Reduced requirement from 15 to 5 for initial predictions
+                if len(self.last_results) >= 5:
                     prediction, number, confidence = self.ultimate_predict(
                         list(self.last_results), 
                         self.loss_streak
@@ -806,9 +828,29 @@ class UltimateAccuracyEngine:
                         "number": number,
                         "confidence": confidence
                     }
+                    
+                    print(f"New prediction: {prediction} {number} for period {next_period}")
+                    self.initialized = True
+                elif len(self.last_results) > 0:
+                    # Even with less than 5 results, make a simple prediction
+                    prediction = "BIG" if sum(1 for n in self.last_results if n >= 5) > len(self.last_results) / 2 else "SMALL"
+                    freq = Counter(self.last_results)
+                    number = max(freq.items(), key=lambda x: x[1])[0]
+                    confidence = 0.5
+                    
+                    self.current_prediction = {
+                        "period": next_period,
+                        "prediction": prediction,
+                        "number": number,
+                        "confidence": confidence
+                    }
+                    
+                    print(f"Initial prediction: {prediction} {number} for period {next_period}")
+                    self.initialized = True
             
             return True
         except Exception as e:
+            self.error_count += 1
             print(f"Error updating results: {e}")
             return False
     
@@ -831,7 +873,10 @@ class UltimateAccuracyEngine:
                 "recent_accuracy": 0,
                 "jackpot_rate": 0,
                 "loss_streak": self.loss_streak,
-                "win_streak": self.win_streak
+                "win_streak": self.win_streak,
+                "initialized": self.initialized,
+                "error_count": self.error_count,
+                "results_count": len(self.last_results)
             }
         
         accuracy = (stats['wins'] / total) * 100
@@ -847,12 +892,46 @@ class UltimateAccuracyEngine:
             "recent_accuracy": round(recent_accuracy, 2),
             "jackpot_rate": round(jackpot_rate, 2),
             "loss_streak": self.loss_streak,
-            "win_streak": self.win_streak
+            "win_streak": self.win_streak,
+            "initialized": self.initialized,
+            "error_count": self.error_count,
+            "results_count": len(self.last_results)
         }
     
     def get_history(self, limit=100):
         """Get prediction history"""
         return self.prediction_history[-limit:] if limit > 0 else self.prediction_history
+    
+    def force_prediction(self):
+        """Force a prediction even with limited data"""
+        if not self.current_prediction and len(self.last_results) > 0:
+            # Make a simple prediction
+            prediction = "BIG" if sum(1 for n in self.last_results if n >= 5) > len(self.last_results) / 2 else "SMALL"
+            freq = Counter(self.last_results)
+            number = max(freq.items(), key=lambda x: x[1])[0]
+            confidence = 0.5
+            
+            # Get the next period
+            data = fetch_latest()
+            if data:
+                latest = data[0]
+                current_period = latest.get("issueNumber", "")
+                next_period = str(int(current_period) + 1) if current_period.isdigit() else ""
+            else:
+                next_period = str(int(time.time()))
+            
+            self.current_prediction = {
+                "period": next_period,
+                "prediction": prediction,
+                "number": number,
+                "confidence": confidence
+            }
+            
+            print(f"Force prediction: {prediction} {number} for period {next_period}")
+            self.initialized = True
+            
+            return True
+        return False
 
 def fetch_latest():
     try:
@@ -860,7 +939,8 @@ def fetch_latest():
         res = requests.get(API_URL.format(ts), headers=HEADERS, timeout=10)
         res.raise_for_status()
         return res.json().get("data", {}).get("list", [])
-    except:
+    except Exception as e:
+        print(f"Error in fetch_latest: {e}")
         return []
 
 # ----------------------------
@@ -893,6 +973,22 @@ def predict():
             }
         })
     else:
+        # Try to force a prediction
+        if ultimate_engine.force_prediction():
+            prediction = ultimate_engine.get_current_prediction()
+            if prediction:
+                return jsonify({
+                    "status": "success",
+                    "data": {
+                        "period": prediction["period"],
+                        "prediction": prediction["prediction"],
+                        "number": prediction["number"],
+                        "confidence": prediction["confidence"],
+                        "loss_streak": ultimate_engine.loss_streak,
+                        "win_streak": ultimate_engine.win_streak
+                    }
+                })
+        
         return jsonify({
             "status": "error",
             "message": "No prediction available yet. Please wait for the next period."
@@ -924,7 +1020,9 @@ def health():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "uptime": "Running"
+        "uptime": "Running",
+        "initialized": ultimate_engine.initialized,
+        "results_count": len(ultimate_engine.last_results)
     })
 
 @app.route('/api/result', methods=['GET'])
@@ -966,6 +1064,20 @@ def period():
         return jsonify({
             "status": "error",
             "message": "Unable to fetch period information"
+        }), 500
+
+@app.route('/api/force_update', methods=['POST'])
+def force_update():
+    """Force an update of results and prediction"""
+    if ultimate_engine.update_results():
+        return jsonify({
+            "status": "success",
+            "message": "Update successful"
+        })
+    else:
+        return jsonify({
+            "status": "error",
+            "message": "Update failed"
         }), 500
 
 if __name__ == "__main__":
