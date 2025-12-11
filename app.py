@@ -963,6 +963,51 @@ class UltimateAccuracyEngine:
     def force_update(self):
         """Force an update of results"""
         return self.update_results()
+    
+    def generate_prediction_on_demand(self):
+        """Generate a prediction on demand without waiting for a new period"""
+        with self.update_lock:
+            if len(self.last_results) >= 1:
+                # Generate a prediction using the same logic
+                if len(self.last_results) >= 5:
+                    prediction, number, confidence = self.ultimate_predict(
+                        list(self.last_results), 
+                        self.loss_streak
+                    )
+                else:
+                    # Even with less than 5 results, make a simple prediction
+                    prediction = "BIG" if sum(1 for n in self.last_results if n >= 5) > len(self.last_results) / 2 else "SMALL"
+                    freq = Counter(self.last_results)
+                    number = max(freq.items(), key=lambda x: x[1])[0]
+                    confidence = 0.5
+                
+                # Get the next period
+                data = fetch_latest()
+                if data:
+                    latest = data[0]
+                    current_period = latest.get("issueNumber", "")
+                    next_period = str(int(current_period) + 1) if current_period.isdigit() else ""
+                else:
+                    next_period = str(int(time.time()))
+                
+                return {
+                    "period": next_period,
+                    "prediction": prediction,
+                    "number": number,
+                    "confidence": confidence,
+                    "loss_streak": self.loss_streak,
+                    "win_streak": self.win_streak
+                }
+            else:
+                # If no results yet, return a default prediction
+                return {
+                    "period": str(int(time.time())),
+                    "prediction": "BIG",
+                    "number": 7,
+                    "confidence": 0.5,
+                    "loss_streak": 0,
+                    "win_streak": 0
+                }
 
 def fetch_latest():
     try:
@@ -1010,26 +1055,12 @@ def predict():
             }
         })
     else:
-        # Try to force a prediction
-        if ultimate_engine.force_prediction():
-            prediction = ultimate_engine.get_current_prediction()
-            if prediction:
-                return jsonify({
-                    "status": "success",
-                    "data": {
-                        "period": prediction["period"],
-                        "prediction": prediction["prediction"],
-                        "number": prediction["number"],
-                        "confidence": prediction["confidence"],
-                        "loss_streak": ultimate_engine.loss_streak,
-                        "win_streak": ultimate_engine.win_streak
-                    }
-                })
-        
+        # Generate a prediction on demand
+        prediction = ultimate_engine.generate_prediction_on_demand()
         return jsonify({
-            "status": "error",
-            "message": "No prediction available yet. Please wait for the next period."
-        }), 404
+            "status": "success",
+            "data": prediction
+        })
 
 @app.route('/api/stats', methods=['GET'])
 def stats():
